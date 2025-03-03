@@ -1,0 +1,229 @@
+---
+title: "College Basketball Machine Learning Model"
+author: "Ryan Biancavilla"
+format: html
+editor: visual
+---
+
+Imports the data from the hoopR API
+
+```{r}
+library(hoopR)
+library(tictoc)
+library(progressr)
+
+tictoc::tic()
+progressr::with_progress({
+  mbb_team_box <- hoopR::load_mbb_team_box(2004:hoopR::most_recent_mbb_season())
+  espn_mbb_teams <- hoopR::espn_mbb_teams(2004:hoopR::most_recent_mbb_season())
+})
+tictoc::toc()
+```
+
+Drops unnecessary columns
+
+```{r}
+tictoc::tic()
+progressr::with_progress({
+  drop_columns <- function(mbb_team_box) {
+    cols_to_drop <- c("team_uid", "team_color", "team_alternate_color", "team_logo", "opponent_team_uid", "opponent_team_color", "opponent_team_alternate_color", "opponent_team_logo", "team_slug", "team_name", "team_abbreviation", "team_display_name", "team_short_display_name", "opponent_team_slug", "opponent_team_name", "opponent_team_abbreviation", "opponent_team_display_name", "opponent_team_short_display_name", "opponent_team_id", "opponent_team_location", "opponent_team_score")
+    
+    semiclean_mbb_team_box <- mbb_team_box[, !(names(mbb_team_box) %in% cols_to_drop)]
+    return(semiclean_mbb_team_box)
+  }
+  semiclean_mbb_team_box <- drop_columns(mbb_team_box)
+})
+tictoc::toc()
+```
+
+Joins each teams stats for each given game, creating stats for the opponent.
+
+```{r}
+library(dplyr)
+tictoc::tic()
+progressr::with_progress({
+  concatenate_team_stats <- function(semiclean_mbb_team_box) {
+    concatenated_df <- semiclean_mbb_team_box %>%
+      inner_join(semiclean_mbb_team_box, by = c("game_id" = "game_id"), relationship = "many-to-many") %>%
+      filter(team_location.x != team_location.y)
+    new_column_names <- colnames(concatenated_df) %>%
+      gsub("\\.x", "", .) %>%
+      gsub("\\.y", "_opp", .)
+    colnames(concatenated_df) <- new_column_names
+    return(concatenated_df)
+  }
+  concatenated_stats <- concatenate_team_stats(semiclean_mbb_team_box)
+})
+tictoc::toc()
+```
+
+Further cleans data, drops unnecessary opponent columns
+
+```{r}
+tictoc::tic()
+progressr::with_progress({
+  drop_columns_2 <- function(concatenated_stats) {
+    cols_to_drop <- c("season_opp", "season_type_opp", "game_date_opp", "game_date_time_opp", 
+                      "team_id_opp", "team_home_away_opp", "team_winner_opp")
+    
+    team_stats <- concatenated_stats[, !(names(concatenated_stats) %in% cols_to_drop)]
+    return(team_stats)
+  }
+  team_stats <- drop_columns_2(concatenated_stats)
+})
+tictoc::toc()
+```
+
+Changes game_date and game_date_time columns to date/time data type. Necessary for time series data analysis.
+
+```{r}
+library(lubridate)
+tictoc::tic()
+progressr::with_progress({
+  team_stats$game_date <- as.Date(team_stats$game_date)
+  team_stats$game_date_time <- ymd_hms(team_stats$game_date_time)
+  
+  str(team_stats)
+})
+tictoc::toc()
+```
+
+```{r}
+summary(team_stats)
+```
+
+Dropping NA values to help with machine learning, might just drop columns with NA values in the future if it improves metrics.
+
+```{r}
+library(dplyr)
+tictoc::tic()
+progressr::with_progress({
+  columns_to_replace <- c("largest_lead", "fast_break_points", "points_in_paint", "turnover_points", "largest_lead_opp", "fast_break_points_opp", "points_in_paint_opp", "turnover_points_opp")
+  
+  team_stats <- team_stats %>%
+    mutate(across(all_of(columns_to_replace), ~ as.integer(ifelse(is.na(.), 0, .))))
+  
+  str(team_stats)
+})
+tictoc::toc()
+```
+
+This code block adds a column to see if the team won their next game. This also converts the boolean value for the winner of each game to a 1 or 0 for binary classification.
+
+```{r}
+library(dplyr)
+tictoc::tic()
+progressr::with_progress({
+  team_stats <- team_stats %>%
+    arrange(team_id, game_date) %>%
+    group_by(team_id) %>%
+    mutate(
+      team_winner = ifelse(team_winner == TRUE, 1, 0),
+      next_game_win = lead(team_winner, order_by = game_date)
+    ) %>%
+    ungroup() %>%
+    mutate(
+      next_game_win = ifelse(is.na(next_game_win), 2, ifelse(next_game_win == TRUE, 1, 0)),
+      team_winner = as.integer(team_winner),
+      next_game_win = as.integer(next_game_win)
+    )
+})
+tictoc::toc()
+```
+
+Classification xgboost model to predict whether a team won or not. Training set is pre-2024 season and testing set is from the 2024 season onward.
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(caret)
+library(xgboost)
+
+# Ensure the data is sorted by team_id and game_date
+team_stats <- team_stats %>%
+  arrange(team_id, game_date)
+
+# Split the data based on the season
+train_data <- team_stats %>% filter(season < 2024)
+test_data  <- team_stats %>% filter(season >= 2024)
+
+# One-hot encode the features for training data
+lab <- train_data$team_winner
+dummy <- dummyVars(" ~ .", data = train_data %>% select(-team_winner, -season))
+newdata <- data.frame(predict(dummy, newdata = train_data %>% select(-team_winner, -season)))
+data_train <- cbind(newdata, lab)
+colnames(data_train)[ncol(data_train)] <- "team_winner"
+data_train$team_winner <- as.factor(data_train$team_winner)
+
+# One-hot encode the features for testing data
+lab_test <- test_data$team_winner
+dummy_test <- dummyVars(" ~ .", data = test_data %>% select(-team_winner, -season))
+newdata_test <- data.frame(predict(dummy_test, newdata = test_data %>% select(-team_winner, -season)))
+data_test <- cbind(newdata_test, lab_test)
+colnames(data_test)[ncol(data_test)] <- "team_winner"
+data_test$team_winner <- as.factor(data_test$team_winner)
+
+# Check for imbalance in the training set
+table(data_train$team_winner)
+
+# Perform up-sampling to handle imbalance
+train_up_sample <- upSample(x = data_train %>% select(-team_winner), y = data_train$team_winner)
+colnames(train_up_sample)[ncol(train_up_sample)] <- "team_winner"
+table(train_up_sample$team_winner)
+
+# Hyperparameter grid for tuning
+grid_tune <- expand.grid(
+  nrounds = c(500, 1000, 1500), 
+  max_depth = c(2, 4, 6),
+  eta = 0.3,
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+# Train control for cross-validation
+train_control <- trainControl(method = "cv",
+                              number = 3,
+                              verboseIter = TRUE,
+                              allowParallel = TRUE)
+
+# Train the XGBoost model with hyperparameter tuning
+xgb_tune <- train(x = train_up_sample %>% select(-team_winner),
+                  y = train_up_sample$team_winner,
+                  trControl = train_control,
+                  tuneGrid = grid_tune,
+                  method = "xgbTree",
+                  verbose = TRUE)
+xgb_tune
+
+# Best hyperparameters
+xgb_tune$bestTune
+
+# Final model training with the best hyperparameters
+train_control_final <- trainControl(method = "none",
+                                    verboseIter = TRUE,
+                                    allowParallel = TRUE)
+
+final_grid <- expand.grid(nrounds = xgb_tune$bestTune$nrounds,
+                          eta = xgb_tune$bestTune$eta,
+                          max_depth = xgb_tune$bestTune$max_depth,
+                          gamma = xgb_tune$bestTune$gamma,
+                          colsample_bytree = xgb_tune$bestTune$colsample_bytree,
+                          min_child_weight = xgb_tune$bestTune$min_child_weight,
+                          subsample = xgb_tune$bestTune$subsample)
+
+xgb_model <- train(x = train_up_sample %>% select(-team_winner),
+                   y = train_up_sample$team_winner,
+                   trControl = train_control_final,
+                   tuneGrid = final_grid,
+                   method = "xgbTree",
+                   verbose = TRUE)
+
+# Prediction on the test set
+xgb_pred <- predict(xgb_model, data_test %>% select(-team_winner))
+
+# Confusion Matrix
+confusionMatrix(as.factor(xgb_pred), as.factor(data_test$team_winner))
+
+```
