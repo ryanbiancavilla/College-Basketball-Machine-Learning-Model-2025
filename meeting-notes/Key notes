@@ -1,0 +1,9 @@
+** NOTES ABOUT THE CODE **
+
+- The target column means if the team won their next game, 1 for a yes, 0 for a no, 2 for a they have not had a next game yet.
+
+- "opp_" is feature engineering to concatenate the opponents stats, creating defensive metrics for each given team.
+
+- All stats were normalized and scaled to league average, excluding metadata.
+
+- Resorted and reindexed data frame to go by game data rather than the original index by game ID.
