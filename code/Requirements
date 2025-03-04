@@ -1,0 +1,11 @@
+** Packages Needed **
+
+Packages to install with PIP:
+
+from sportsdataverse.mbb import mbb_loaders
+import pandas as pd
+from sklearn.linear_model import RidgeClassifier
+from sklearn.feature_selection import SequentialFeatureSelector
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import accuracy_score
