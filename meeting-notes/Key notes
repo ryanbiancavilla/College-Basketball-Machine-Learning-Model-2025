@@ -9,3 +9,7 @@
 - Resorted and reindexed data frame to go by game data rather than the original index by game ID.
 
 - added 5 game rolling average for each team, regression somehow got worse.
+
+- To predict future games, we will have to map and index the teams next matchup where there is a 2 for the target
+
+- LTSM NN will be plug and play with the ridge regression.
